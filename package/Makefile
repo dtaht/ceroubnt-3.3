@@ -9,22 +9,15 @@ curdir:=package
 
 -include $(TMP_DIR)/.packagedeps
 $(curdir)/builddirs:=$(sort $(package-) $(package-y) $(package-m))
+$(curdir)/builddirs-install:=.
 ifeq ($(SDK),1)
-  $(curdir)/builddirs-install:=.
 else
   $(curdir)/builddirs-default:=. $(sort $(package-y) $(package-m))
   $(curdir)/builddirs-prereq:=. $(sort $(prereq-y) $(prereq-m))
-  $(curdir)/builddirs-install:=. $(filter-out base-files,$(sort $(package-y))) $(filter base-files,$(package-y))
 endif
 ifneq ($(IGNORE_ERRORS),)
   $(curdir)/builddirs-ignore-compile:= $(if $(filter n m y, $(IGNORE_ERRORS)),$(foreach m,$(IGNORE_ERRORS),$(package-$(subst n,,$(m)))),$(package-m) $(package-))
 endif
-
-$(curdir)/install:=$(curdir)/install-cleanup
-
-$(curdir)/cleanup: $(TMP_DIR)/.build
-	- find $(STAGING_DIR_ROOT) -type d | $(XARGS) chmod 0755
-	rm -rf $(TARGET_DIR) $(STAGING_DIR_ROOT)
 
 ifdef CONFIG_USE_MKLIBS
   define mklibs
@@ -61,30 +54,36 @@ ifdef CONFIG_USE_MKLIBS
   endef
 endif
 
-ifdef CONFIG_USE_GPG
-  define gpg
-	@(cd $(PACKAGE_DIR); gpg --batch \
-		--detach-sign \
-		--local-user $(CONFIG_GPG_KEY) \
-		--yes \
-		--output Packages.sig Packages \
-	)
-  endef
-endif
+# where to build (and put) .ipk packages
+OPKG:= \
+  IPKG_TMP=$(TMP_DIR)/ipkg \
+  IPKG_INSTROOT=$(TARGET_DIR) \
+  IPKG_CONF_DIR=$(STAGING_DIR)/etc \
+  IPKG_OFFLINE_ROOT=$(TARGET_DIR) \
+  $(STAGING_DIR_HOST)/bin/opkg \
+	--offline-root $(TARGET_DIR) \
+	--force-depends \
+	--force-overwrite \
+	--force-postinstall \
+	--force-maintainer \
+	--add-dest root:/ \
+	--add-arch all:100 \
+	--add-arch $(if $(ARCH_PACKAGES),$(ARCH_PACKAGES),$(BOARD)):200
 
-ifdef CONFIG_USE_SMIME
-  define smime
-	@(cd $(PACKAGE_DIR); openssl smime -binary \
-		-in Packages \
-		-out Packages.sig \
-		-outform PEM \
-		-sign \
-		-signer $(CONFIG_SMIME_CERTIFICATE) \
-	)
-  endef
-endif
+PACKAGE_INSTALL:=$(sort $(foreach pkg,$(package-y),$(lastword $(subst /,$(space),$(pkg)))))
+PACKAGE_INSTALL_FILES:=$(patsubst %,$(PKG_INFO_DIR)/%.install,$(PACKAGE_INSTALL))
 
-$(curdir)/rootfs-prepare: $(TMP_DIR)/.build
+$(curdir)/install: $(TMP_DIR)/.build
+	- find $(STAGING_DIR_ROOT) -type d | $(XARGS) chmod 0755
+	rm -rf $(TARGET_DIR) $(STAGING_DIR_ROOT)
+	[ -d $(TARGET_DIR)/tmp ] || mkdir -p $(TARGET_DIR)/tmp
+	$(OPKG) install `cat $(PACKAGE_INSTALL_FILES) | sed -e 's,^\(.*\)$$,$(PACKAGE_DIR)/\1_*.ipk,'`
+	@for pkg in $(PACKAGE_INSTALL); do \
+		[ -s $(PKG_INFO_DIR)/$${pkg}.install.flags ] || continue; \
+		for flag in `cat $(PKG_INFO_DIR)/$${pkg}.install.flags`; do \
+			$(OPKG) flag $$flag `cat $(PKG_INFO_DIR)/$${pkg}.install`; \
+		done; \
+	done || true
 	@-$(MAKE) package/preconfig
 	@if [ -d $(TOPDIR)/files ]; then \
 		( cd $(TOPDIR)/files; find -type f ) | \
@@ -116,15 +115,13 @@ $(curdir)/index: FORCE
 	@(cd $(PACKAGE_DIR); $(SCRIPT_DIR)/ipkg-make-index.sh . 2>&1 > Packages && \
 		gzip -9c Packages > Packages.gz \
 	)
-	$(call gpg)
-	$(call smime)
+
+$(curdir)/preconfig:
 
 $(curdir)/flags-install:= -j1
 
 $(eval $(call stampfile,$(curdir),package,prereq,.config))
-$(eval $(call stampfile,$(curdir),package,cleanup,$(TMP_DIR)/.build))
 $(eval $(call stampfile,$(curdir),package,compile,$(TMP_DIR)/.build))
 $(eval $(call stampfile,$(curdir),package,install,$(TMP_DIR)/.build))
-$(eval $(call stampfile,$(curdir),package,rootfs-prepare,$(TMP_DIR)/.build))
 
 $(eval $(call subdir,$(curdir)))
